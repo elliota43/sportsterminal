@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"time"
 )
 
@@ -234,6 +235,11 @@ func GetGames(sport string, league string) ([]Game, error) {
 
 		games = append(games, game)
 	}
+
+	// Sort games by date (chronologically)
+	sort.Slice(games, func(i, j int) bool {
+		return games[i].Date.Before(games[j].Date)
+	})
 
 	return games, nil
 }
