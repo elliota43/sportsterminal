@@ -15,27 +15,37 @@ const (
 	sportView viewState = iota
 	leagueView
 	gamesView
+	gameDetailView
 )
 
 type Model struct {
-	state          viewState
-	selectedSport  *api.Sport
-	selectedLeague *api.League
-	games          []api.Game
-	sportCursor    int
-	leagueCursor   int
-	gameCursor     int
-	width          int
-	height         int
-	loading        bool
-	err            error
-	lastUpdate     time.Time
-	autoRefresh    bool
+	state              viewState
+	selectedSport      *api.Sport
+	selectedLeague     *api.League
+	games              []api.Game
+	selectedGameDetail *api.GameDetail
+	sportCursor        int
+	leagueCursor       int
+	gameCursor         int
+	gameScrollOffset   int
+	detailScrollOffset int
+	width              int
+	height             int
+	loading            bool
+	loadingDetail      bool
+	err                error
+	lastUpdate         time.Time
+	autoRefresh        bool
 }
 
 type gamesLoadedMsg struct {
 	games []api.Game
 	err   error
+}
+
+type gameDetailLoadedMsg struct {
+	detail *api.GameDetail
+	err    error
 }
 
 type tickMsg time.Time
@@ -68,6 +78,13 @@ func loadGamesCmd(sport, league string) tea.Cmd {
 	}
 }
 
+func loadGameDetailCmd(sport, league, eventID string) tea.Cmd {
+	return func() tea.Msg {
+		detail, err := api.GetGameDetail(sport, league, eventID)
+		return gameDetailLoadedMsg{detail: detail, err: err}
+	}
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -88,7 +105,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case gamesView:
 				m.state = leagueView
 				m.gameCursor = 0
+				m.gameScrollOffset = 0
 				m.games = nil
+			case gameDetailView:
+				m.state = gamesView
+				m.selectedGameDetail = nil
+				m.detailScrollOffset = 0
 			}
 			return m, nil
 
@@ -113,6 +135,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case gamesView:
 				if m.gameCursor > 0 {
 					m.gameCursor--
+					// Scroll up if cursor moves above visible area
+					if m.gameCursor < m.gameScrollOffset {
+						m.gameScrollOffset = m.gameCursor
+					}
+				}
+			case gameDetailView:
+				if m.detailScrollOffset > 0 {
+					m.detailScrollOffset--
 				}
 			}
 			return m, nil
@@ -130,7 +160,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case gamesView:
 				if m.gameCursor < len(m.games)-1 {
 					m.gameCursor++
+					// Calculate visible games and scroll down if needed
+					visibleGames := m.calculateVisibleGames()
+					if m.gameCursor >= m.gameScrollOffset+visibleGames {
+						m.gameScrollOffset = m.gameCursor - visibleGames + 1
+					}
 				}
+			case gameDetailView:
+				m.detailScrollOffset++
 			}
 			return m, nil
 
@@ -148,7 +185,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.state = gamesView
 					m.loading = true
 					m.gameCursor = 0
+					m.gameScrollOffset = 0
 					return m, loadGamesCmd(m.selectedSport.ID, m.selectedLeague.ID)
+				}
+			case gamesView:
+				if m.gameCursor < len(m.games) {
+					m.state = gameDetailView
+					m.loadingDetail = true
+					m.detailScrollOffset = 0
+					selectedGame := m.games[m.gameCursor]
+					return m, loadGameDetailCmd(m.selectedSport.ID, m.selectedLeague.ID, selectedGame.ID)
 				}
 			}
 			return m, nil
@@ -159,6 +205,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.games = msg.games
 		m.err = msg.err
 		m.lastUpdate = time.Now()
+		return m, nil
+
+	case gameDetailLoadedMsg:
+		m.loadingDetail = false
+		m.selectedGameDetail = msg.detail
+		m.err = msg.err
 		return m, nil
 
 	case tickMsg:
@@ -198,6 +250,8 @@ func (m Model) View() string {
 		content = m.renderLeagueView()
 	case gamesView:
 		content = m.renderGamesView()
+	case gameDetailView:
+		content = m.renderGameDetailView()
 	}
 
 	return lipgloss.Place(
@@ -297,25 +351,64 @@ func (m Model) renderGamesView() string {
 		return lipgloss.JoinVertical(lipgloss.Left, title, statusText, "", noGames, "", help)
 	}
 
+	// Calculate visible games window
+	visibleGames := m.calculateVisibleGames()
+	startIdx := m.gameScrollOffset
+	endIdx := startIdx + visibleGames
+	if endIdx > len(m.games) {
+		endIdx = len(m.games)
+	}
+
 	var items string
-	for i, game := range m.games {
+	for i := startIdx; i < endIdx; i++ {
 		cursor := "  "
 		if i == m.gameCursor {
 			cursor = "❯ "
 		}
-		items += cursor + m.renderGame(game, i == m.gameCursor) + "\n\n"
+		items += cursor + m.renderGame(m.games[i], i == m.gameCursor) + "\n\n"
 	}
 
-	help := helpStyle.Render("↑/k up • ↓/j down • r refresh • esc back • q quit")
+	// Add scroll indicator
+	scrollIndicator := ""
+	if len(m.games) > visibleGames {
+		scrollIndicator = lipgloss.NewStyle().Foreground(dimColor).Render(fmt.Sprintf(" (Showing %d-%d of %d games)", startIdx+1, endIdx, len(m.games)))
+	}
+
+	help := helpStyle.Render("↑/k up • ↓/j down • enter details • r refresh • esc back • q quit")
 
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
 		title,
-		statusText,
+		statusText+scrollIndicator,
 		"",
 		items,
 		help,
 	)
+}
+
+// calculateVisibleGames calculates how many game cards can fit in the viewport
+func (m Model) calculateVisibleGames() int {
+	// Each game card takes roughly 11 lines (including spacing):
+	// - Status (1 line)
+	// - Empty line (1)
+	// - Away team (1)
+	// - Home team (1)
+	// - Empty line (1)
+	// - Venue (1)
+	// - Time (1)
+	// - Box padding/borders (2)
+	// - Spacing between cards (2)
+	const linesPerGame = 11
+	
+	// Reserve space for: title (3), status (1), empty (1), help (2), margins (4)
+	const reservedLines = 11
+	
+	availableHeight := m.height - reservedLines
+	if availableHeight < linesPerGame {
+		return 1 // Always show at least 1 game
+	}
+	
+	return availableHeight / linesPerGame
 }
 
 func (m Model) renderGame(game api.Game, selected bool) string {
@@ -355,6 +448,171 @@ func (m Model) renderGame(game api.Game, selected bool) string {
 	)
 
 	return boxStyle.Render(content)
+}
+
+func (m Model) renderGameDetailView() string {
+	if m.loadingDetail {
+		return lipgloss.JoinVertical(
+			lipgloss.Left,
+			titleStyle.Render("🏆 Game Details"),
+			subtitleStyle.Render("Loading game details..."),
+		)
+	}
+
+	if m.err != nil {
+		errorMsg := errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
+		help := helpStyle.Render("esc back • q quit")
+		return lipgloss.JoinVertical(lipgloss.Left, titleStyle.Render("🏆 Game Details"), "", errorMsg, "", help)
+	}
+
+	if m.selectedGameDetail == nil {
+		return "No game details available"
+	}
+
+	detail := m.selectedGameDetail
+
+	// Build content lines
+	var contentLines []string
+
+	// Header with scores
+	status := detail.Status
+	if detail.IsLive {
+		status = liveStyle.Render(fmt.Sprintf("🔴 LIVE - %s", detail.Status))
+		if detail.Period != "" && detail.Clock != "" {
+			status += statusStyle.Render(fmt.Sprintf(" • %s %s", detail.Period, detail.Clock))
+		}
+	} else {
+		status = statusStyle.Render(status)
+	}
+	contentLines = append(contentLines, status)
+	contentLines = append(contentLines, "")
+
+	// Score summary
+	awayRecord := ""
+	homeRecord := ""
+	if detail.AwayTeam.Record != "" {
+		awayRecord = fmt.Sprintf(" (%s)", detail.AwayTeam.Record)
+	}
+	if detail.HomeTeam.Record != "" {
+		homeRecord = fmt.Sprintf(" (%s)", detail.HomeTeam.Record)
+	}
+
+	contentLines = append(contentLines, 
+		teamStyle.Render(fmt.Sprintf("%-35s %5s", detail.AwayTeam.Name+awayRecord, detail.AwayTeam.Score)))
+	contentLines = append(contentLines, 
+		teamStyle.Render(fmt.Sprintf("%-35s %5s", detail.HomeTeam.Name+homeRecord, detail.HomeTeam.Score)))
+	contentLines = append(contentLines, "")
+
+	// Venue and attendance
+	if detail.Venue != "" {
+		contentLines = append(contentLines, venueStyle.Render(fmt.Sprintf("📍 %s", detail.Venue)))
+	}
+	if detail.Attendance != "" {
+		contentLines = append(contentLines, venueStyle.Render(fmt.Sprintf("👥 Attendance: %s", detail.Attendance)))
+	}
+	contentLines = append(contentLines, "")
+
+	// Team Leaders
+	if len(detail.Leaders) > 0 {
+		contentLines = append(contentLines, lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render("⭐ Game Leaders"))
+		contentLines = append(contentLines, "")
+		for _, leader := range detail.Leaders {
+			leaderLine := fmt.Sprintf("  %s: %s (%s) - %s", 
+				leader.Category, 
+				leader.Athlete, 
+				leader.Team, 
+				leader.Value)
+			contentLines = append(contentLines, itemStyle.Render(leaderLine))
+		}
+		contentLines = append(contentLines, "")
+	}
+
+	// Team Statistics
+	if len(detail.HomeTeam.Statistics) > 0 || len(detail.AwayTeam.Statistics) > 0 {
+		contentLines = append(contentLines, lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render("📊 Team Statistics"))
+		contentLines = append(contentLines, "")
+		
+		// Create columns for away and home stats
+		maxStats := len(detail.AwayTeam.Statistics)
+		if len(detail.HomeTeam.Statistics) > maxStats {
+			maxStats = len(detail.HomeTeam.Statistics)
+		}
+		
+		for i := 0; i < maxStats && i < 10; i++ { // Limit to 10 stats
+			var statLine string
+			if i < len(detail.AwayTeam.Statistics) {
+				stat := detail.AwayTeam.Statistics[i]
+				statLine = fmt.Sprintf("  %-20s: %8s", stat.Label, stat.Value)
+			}
+			if i < len(detail.HomeTeam.Statistics) {
+				stat := detail.HomeTeam.Statistics[i]
+				statLine += fmt.Sprintf("    |    %-20s: %8s", stat.Label, stat.Value)
+			}
+			contentLines = append(contentLines, statusStyle.Render(statLine))
+		}
+		contentLines = append(contentLines, "")
+	}
+
+	// Recent Plays
+	if len(detail.Plays) > 0 {
+		contentLines = append(contentLines, lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render("📝 Recent Plays"))
+		contentLines = append(contentLines, "")
+		
+		playCount := 0
+		for _, play := range detail.Plays {
+			if playCount >= 15 { // Limit display
+				break
+			}
+			
+			playPrefix := "  "
+			playTextStyle := statusStyle
+			if play.ScoringPlay {
+				playPrefix = "🎯 "
+				playTextStyle = liveStyle
+			}
+			
+			clockInfo := ""
+			if play.Period != "" && play.Clock != "" {
+				clockInfo = fmt.Sprintf("[%s %s] ", play.Period, play.Clock)
+			}
+			
+			playText := fmt.Sprintf("%s%s%s", playPrefix, clockInfo, play.Text)
+			contentLines = append(contentLines, playTextStyle.Render(playText))
+			playCount++
+		}
+	}
+
+	// Calculate visible content
+	availableHeight := m.height - 8 // Reserve for title, help, margins
+	startLine := m.detailScrollOffset
+	endLine := startLine + availableHeight
+	if endLine > len(contentLines) {
+		endLine = len(contentLines)
+	}
+	if startLine >= len(contentLines) {
+		startLine = 0
+	}
+
+	visibleContent := lipgloss.JoinVertical(lipgloss.Left, contentLines[startLine:endLine]...)
+
+	// Scroll indicator
+	scrollInfo := ""
+	if len(contentLines) > availableHeight {
+		scrollInfo = lipgloss.NewStyle().Foreground(dimColor).Render(
+			fmt.Sprintf(" (Scroll: %d/%d lines)", startLine+1, len(contentLines)))
+	}
+
+	title := titleStyle.Render("🏆 Game Details")
+	help := helpStyle.Render("↑/k up • ↓/j down • esc back • q quit")
+
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		title+scrollInfo,
+		"",
+		visibleContent,
+		"",
+		help,
+	)
 }
 
 func getSportIcon(sportID string) string {

@@ -31,9 +31,21 @@ make build
      - Game status (Final, In Progress, Scheduled)
      - Venue location
      - Date and time
+   - Press `Enter` to view detailed game information
    - Press `r` to manually refresh scores
    - Auto-refreshes every 30 seconds for live games
    - Press `Esc` to go back to league selection
+
+4. **Game Detail View** (Fourth Screen)
+   - View comprehensive game information:
+     - Live score with period and clock (for live games)
+     - Team records
+     - Venue and attendance
+     - Game leaders (top performers)
+     - Team statistics (box score)
+     - Recent plays and scoring plays (marked with 🎯)
+   - Scroll through content with `↑/↓` or `k/j`
+   - Press `Esc` to return to games list
 
 ## Keyboard Controls Quick Reference
 

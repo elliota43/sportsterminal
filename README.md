@@ -14,6 +14,8 @@ A beautiful and functional terminal interface for checking live sports scores an
 - 📊 **Real-time Data** - Powered by ESPN's public API
 - ⌨️ **Keyboard Navigation** - Vim-style keybindings (hjkl) and arrow keys
 - 🎯 **Easy to Use** - Intuitive navigation between sports, leagues, and games
+- 📊 **Detailed Game Info** - Click any game to view box scores, stats, and play-by-play
+- 🔥 **Live Play Updates** - See scoring plays and key moments as they happen
 
 ## 📦 Installation
 
@@ -67,7 +69,13 @@ Simply run the application:
 
 #### Games View
 - `r` - Manually refresh scores
+- `Enter` - View detailed game information
 - Auto-refresh every 30 seconds for live games
+
+#### Game Detail View
+- `↑/k` and `↓/j` - Scroll through game details
+- `Esc` - Return to games list
+- View: Team stats, box score, game leaders, recent plays
 
 ## 🎮 Sports & Leagues Supported
 
@@ -123,7 +131,10 @@ The application features:
 - Live game indicators (🔴 LIVE)
 - Real-time score updates
 - Game status and venue information
-- Smooth navigation between views
+- Detailed game view with box scores and play-by-play
+- Team statistics and game leaders
+- Scoring plays highlighted in red (🎯)
+- Smooth navigation and scrolling
 
 ## 🚀 Publishing to Homebrew
 
