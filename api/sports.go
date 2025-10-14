@@ -14,8 +14,8 @@ const (
 )
 
 type Sport struct {
-	Name string
-	ID   string
+	Name    string
+	ID      string
 	Leagues []League
 }
 
@@ -44,19 +44,19 @@ type Team struct {
 }
 
 type GameDetail struct {
-	ID          string
-	Name        string
-	Status      string
+	ID           string
+	Name         string
+	Status       string
 	StatusDetail string
-	IsLive      bool
-	HomeTeam    TeamDetail
-	AwayTeam    TeamDetail
-	Venue       string
-	Attendance  string
-	Plays       []Play
-	Leaders     []Leader
-	Period      string
-	Clock       string
+	IsLive       bool
+	HomeTeam     TeamDetail
+	AwayTeam     TeamDetail
+	Venue        string
+	Attendance   string
+	Plays        []Play
+	Leaders      []Leader
+	Period       string
+	Clock        string
 }
 
 type TeamDetail struct {
@@ -90,13 +90,13 @@ type Leader struct {
 
 type ESPNResponse struct {
 	Events []struct {
-		ID          string `json:"id"`
-		Name        string `json:"name"`
-		ShortName   string `json:"shortName"`
-		Date        string `json:"date"`
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		ShortName    string `json:"shortName"`
+		Date         string `json:"date"`
 		Competitions []struct {
-			ID        string `json:"id"`
-			Venue     struct {
+			ID    string `json:"id"`
+			Venue struct {
 				FullName string `json:"fullName"`
 			} `json:"venue"`
 			Status struct {
@@ -170,12 +170,16 @@ var AvailableSports = []Sport{
 }
 
 func GetGames(sport string, league string) ([]Game, error) {
+	return GetGamesWithOptions(sport, league, false)
+}
+
+func GetGamesWithOptions(sport string, league string, includeUpcoming bool) ([]Game, error) {
 	url := fmt.Sprintf("%s/%s/%s/scoreboard", espnAPIBase, sport, league)
-	
+
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 	}
-	
+
 	resp, err := client.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch games: %w", err)
@@ -197,12 +201,48 @@ func GetGames(sport string, league string) ([]Game, error) {
 	}
 
 	games := make([]Game, 0, len(espnResp.Events))
+	now := time.Now()
+
+	// Set date range based on whether to include upcoming games
+	var cutoffDate, futureDate time.Time
+	if includeUpcoming {
+		// Show today through October 19, 2025 (upcoming games)
+		cutoffDate = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		futureDate = time.Date(2025, 10, 19, 23, 59, 59, 0, now.Location())
+	} else {
+		// Show today's games only (current games)
+		cutoffDate = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		futureDate = time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 0, now.Location())
+	}
+
 	for _, event := range espnResp.Events {
 		if len(event.Competitions) == 0 {
 			continue
 		}
 
 		comp := event.Competitions[0]
+
+		// Parse date first to filter
+		var gameDate time.Time
+		if t, err := time.Parse(time.RFC3339, event.Date); err == nil {
+			gameDate = t
+		} else if t, err := time.Parse("2006-01-02T15:04Z", event.Date); err == nil {
+			// ESPN sometimes returns dates without seconds
+			gameDate = t
+		} else {
+			continue // Skip games with invalid dates
+		}
+
+		// Debug: Print date comparison (remove this later)
+		// fmt.Printf("Game: %s, Date: %s, Cutoff: %s, Future: %s\n",
+		//     event.Name, gameDate.Format("2006-01-02"),
+		//     cutoffDate.Format("2006-01-02"), futureDate.Format("2006-01-02"))
+
+		// Only include games within our date range
+		if gameDate.Before(cutoffDate) || gameDate.After(futureDate) {
+			continue
+		}
+
 		game := Game{
 			ID:        event.ID,
 			Name:      event.Name,
@@ -210,11 +250,7 @@ func GetGames(sport string, league string) ([]Game, error) {
 			Status:    comp.Status.Type.Description,
 			IsLive:    comp.Status.Type.State == "in",
 			Venue:     comp.Venue.FullName,
-		}
-
-		// Parse date
-		if t, err := time.Parse(time.RFC3339, event.Date); err == nil {
-			game.Date = t
+			Date:      gameDate,
 		}
 
 		// Extract team information
@@ -246,11 +282,11 @@ func GetGames(sport string, league string) ([]Game, error) {
 
 func GetGameDetail(sport string, league string, eventID string) (*GameDetail, error) {
 	url := fmt.Sprintf("%s/%s/%s/summary?event=%s", espnAPIBase, sport, league, eventID)
-	
+
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 	}
-	
+
 	resp, err := client.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch game details: %w", err)
@@ -279,7 +315,7 @@ func GetGameDetail(sport string, league string, eventID string) (*GameDetail, er
 	if header, ok := result["header"].(map[string]interface{}); ok {
 		if competitions, ok := header["competitions"].([]interface{}); ok && len(competitions) > 0 {
 			comp := competitions[0].(map[string]interface{})
-			
+
 			// Status
 			if status, ok := comp["status"].(map[string]interface{}); ok {
 				if statusType, ok := status["type"].(map[string]interface{}); ok {
@@ -306,7 +342,7 @@ func GetGameDetail(sport string, league string, eventID string) (*GameDetail, er
 				for _, c := range competitors {
 					competitor := c.(map[string]interface{})
 					teamDetail := parseTeamDetail(competitor)
-					
+
 					if getString(competitor, "homeAway") == "home" {
 						detail.HomeTeam = teamDetail
 					} else {
@@ -323,7 +359,7 @@ func GetGameDetail(sport string, league string, eventID string) (*GameDetail, er
 			for _, t := range teams {
 				team := t.(map[string]interface{})
 				teamID := getString(team, "team", "id")
-				
+
 				stats := []Statistic{}
 				if statistics, ok := team["statistics"].([]interface{}); ok {
 					for _, s := range statistics {
@@ -351,11 +387,11 @@ func GetGameDetail(sport string, league string, eventID string) (*GameDetail, er
 		playCount := 0
 		for i := len(plays) - 1; i >= 0 && playCount < 20; i-- {
 			play := plays[i].(map[string]interface{})
-			
+
 			// Only include significant plays
-			if scoringPlay, _ := play["scoringPlay"].(bool); scoringPlay || 
+			if scoringPlay, _ := play["scoringPlay"].(bool); scoringPlay ||
 				getString(play, "type", "text") != "" {
-				
+
 				detail.Plays = append([]Play{{
 					Period:      getString(play, "period", "displayValue"),
 					Clock:       getString(play, "clock", "displayValue"),
@@ -393,20 +429,20 @@ func GetGameDetail(sport string, league string, eventID string) (*GameDetail, er
 
 func parseTeamDetail(competitor map[string]interface{}) TeamDetail {
 	td := TeamDetail{}
-	
+
 	if team, ok := competitor["team"].(map[string]interface{}); ok {
 		td.Name = getString(team, "displayName")
 		td.ShortName = getString(team, "shortDisplayName")
 		td.Logo = getString(team, "logo")
 	}
-	
+
 	td.Score = getString(competitor, "score")
-	
+
 	if records, ok := competitor["records"].([]interface{}); ok && len(records) > 0 {
 		record := records[0].(map[string]interface{})
 		td.Record = getString(record, "summary")
 	}
-	
+
 	return td
 }
 
@@ -427,4 +463,3 @@ func getString(m map[string]interface{}, keys ...string) string {
 	}
 	return ""
 }
-
