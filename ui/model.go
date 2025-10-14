@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -33,6 +34,7 @@ type Model struct {
 	height             int
 	loading            bool
 	loadingDetail      bool
+	showUpcoming       bool
 	err                error
 	lastUpdate         time.Time
 	autoRefresh        bool
@@ -71,9 +73,9 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-func loadGamesCmd(sport, league string) tea.Cmd {
+func loadGamesCmd(sport, league string, showUpcoming bool) tea.Cmd {
 	return func() tea.Msg {
-		games, err := api.GetGames(sport, league)
+		games, err := api.GetGamesWithOptions(sport, league, showUpcoming)
 		return gamesLoadedMsg{games: games, err: err}
 	}
 }
@@ -118,7 +120,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Manual refresh
 			if m.state == gamesView && m.selectedSport != nil && m.selectedLeague != nil {
 				m.loading = true
-				return m, loadGamesCmd(m.selectedSport.ID, m.selectedLeague.ID)
+				return m, loadGamesCmd(m.selectedSport.ID, m.selectedLeague.ID, m.showUpcoming)
+			}
+			return m, nil
+
+		case "u":
+			// Toggle upcoming games
+			if m.state == gamesView && m.selectedSport != nil && m.selectedLeague != nil {
+				m.showUpcoming = !m.showUpcoming
+				m.loading = true
+				m.gameCursor = 0
+				m.gameScrollOffset = 0
+				return m, loadGamesCmd(m.selectedSport.ID, m.selectedLeague.ID, m.showUpcoming)
 			}
 			return m, nil
 
@@ -186,7 +199,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.loading = true
 					m.gameCursor = 0
 					m.gameScrollOffset = 0
-					return m, loadGamesCmd(m.selectedSport.ID, m.selectedLeague.ID)
+					m.showUpcoming = false // Reset to current games when changing leagues
+					return m, loadGamesCmd(m.selectedSport.ID, m.selectedLeague.ID, m.showUpcoming)
 				}
 			case gamesView:
 				if m.gameCursor < len(m.games) {
@@ -225,7 +239,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if hasLiveGames {
 				return m, tea.Batch(
-					loadGamesCmd(m.selectedSport.ID, m.selectedLeague.ID),
+					loadGamesCmd(m.selectedSport.ID, m.selectedLeague.ID, m.showUpcoming),
 					tickCmd(),
 				)
 			}
@@ -330,7 +344,7 @@ func (m Model) renderGamesView() string {
 	}
 
 	title := titleStyle.Render(fmt.Sprintf("🏆 %s - %s", m.selectedSport.Name, m.selectedLeague.Name))
-	
+
 	var statusText string
 	if m.loading {
 		statusText = subtitleStyle.Render("Loading games...")
@@ -346,8 +360,23 @@ func (m Model) renderGamesView() string {
 	}
 
 	if len(m.games) == 0 && !m.loading {
-		noGames := itemStyle.Render("No games scheduled")
-		help := helpStyle.Render("r refresh • esc back • q quit")
+		var noGamesText string
+		if !m.showUpcoming {
+			noGamesText = "No current games. Press 'u' to view upcoming games."
+		} else {
+			noGamesText = "No upcoming games scheduled."
+		}
+		noGames := itemStyle.Render(noGamesText)
+
+		// Build help text
+		helpText := "r refresh • esc back • q quit"
+		if !m.showUpcoming {
+			helpText = "u upcoming • r refresh • esc back • q quit"
+		} else {
+			helpText = "u current • r refresh • esc back • q quit"
+		}
+		help := helpStyle.Render(helpText)
+
 		return lipgloss.JoinVertical(lipgloss.Left, title, statusText, "", noGames, "", help)
 	}
 
@@ -374,7 +403,14 @@ func (m Model) renderGamesView() string {
 		scrollIndicator = lipgloss.NewStyle().Foreground(dimColor).Render(fmt.Sprintf(" (Showing %d-%d of %d games)", startIdx+1, endIdx, len(m.games)))
 	}
 
-	help := helpStyle.Render("↑/k up • ↓/j down • enter details • r refresh • esc back • q quit")
+	// Build help text based on current state
+	helpText := "↑/k up • ↓/j down • enter details • r refresh • esc back • q quit"
+	if !m.showUpcoming {
+		helpText = "↑/k up • ↓/j down • enter details • u upcoming • r refresh • esc back • q quit"
+	} else {
+		helpText = "↑/k up • ↓/j down • enter details • u current • r refresh • esc back • q quit"
+	}
+	help := helpStyle.Render(helpText)
 
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
@@ -399,15 +435,15 @@ func (m Model) calculateVisibleGames() int {
 	// - Box padding/borders (2)
 	// - Spacing between cards (2)
 	const linesPerGame = 11
-	
+
 	// Reserve space for: title (3), status (1), empty (1), help (2), margins (4)
 	const reservedLines = 11
-	
+
 	availableHeight := m.height - reservedLines
 	if availableHeight < linesPerGame {
 		return 1 // Always show at least 1 game
 	}
-	
+
 	return availableHeight / linesPerGame
 }
 
@@ -426,7 +462,7 @@ func (m Model) renderGame(game api.Game, selected bool) string {
 
 	awayScore := game.AwayTeam.Score
 	homeScore := game.HomeTeam.Score
-	
+
 	if awayScore == "" {
 		awayScore = "-"
 	}
@@ -471,56 +507,34 @@ func (m Model) renderGameDetailView() string {
 
 	detail := m.selectedGameDetail
 
-	// Build content lines
+	// FIXED HEADER - Teams and scores (always visible)
+	header := m.renderGameDetailHeader(detail)
+
+	// SCROLLABLE CONTENT - Everything else
 	var contentLines []string
 
-	// Header with scores
-	status := detail.Status
-	if detail.IsLive {
-		status = liveStyle.Render(fmt.Sprintf("🔴 LIVE - %s", detail.Status))
-		if detail.Period != "" && detail.Clock != "" {
-			status += statusStyle.Render(fmt.Sprintf(" • %s %s", detail.Period, detail.Clock))
-		}
-	} else {
-		status = statusStyle.Render(status)
-	}
-	contentLines = append(contentLines, status)
-	contentLines = append(contentLines, "")
-
-	// Score summary
-	awayRecord := ""
-	homeRecord := ""
-	if detail.AwayTeam.Record != "" {
-		awayRecord = fmt.Sprintf(" (%s)", detail.AwayTeam.Record)
-	}
-	if detail.HomeTeam.Record != "" {
-		homeRecord = fmt.Sprintf(" (%s)", detail.HomeTeam.Record)
-	}
-
-	contentLines = append(contentLines, 
-		teamStyle.Render(fmt.Sprintf("%-35s %5s", detail.AwayTeam.Name+awayRecord, detail.AwayTeam.Score)))
-	contentLines = append(contentLines, 
-		teamStyle.Render(fmt.Sprintf("%-35s %5s", detail.HomeTeam.Name+homeRecord, detail.HomeTeam.Score)))
-	contentLines = append(contentLines, "")
-
 	// Venue and attendance
-	if detail.Venue != "" {
-		contentLines = append(contentLines, venueStyle.Render(fmt.Sprintf("📍 %s", detail.Venue)))
+	if detail.Venue != "" || detail.Attendance != "" {
+		contentLines = append(contentLines, lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render("📍 Game Info"))
+		contentLines = append(contentLines, "")
+		if detail.Venue != "" {
+			contentLines = append(contentLines, venueStyle.Render(fmt.Sprintf("  Venue: %s", detail.Venue)))
+		}
+		if detail.Attendance != "" {
+			contentLines = append(contentLines, venueStyle.Render(fmt.Sprintf("  Attendance: %s", detail.Attendance)))
+		}
+		contentLines = append(contentLines, "")
 	}
-	if detail.Attendance != "" {
-		contentLines = append(contentLines, venueStyle.Render(fmt.Sprintf("👥 Attendance: %s", detail.Attendance)))
-	}
-	contentLines = append(contentLines, "")
 
 	// Team Leaders
 	if len(detail.Leaders) > 0 {
 		contentLines = append(contentLines, lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render("⭐ Game Leaders"))
 		contentLines = append(contentLines, "")
 		for _, leader := range detail.Leaders {
-			leaderLine := fmt.Sprintf("  %s: %s (%s) - %s", 
-				leader.Category, 
-				leader.Athlete, 
-				leader.Team, 
+			leaderLine := fmt.Sprintf("  %s: %s (%s) - %s",
+				leader.Category,
+				leader.Athlete,
+				leader.Team,
 				leader.Value)
 			contentLines = append(contentLines, itemStyle.Render(leaderLine))
 		}
@@ -531,22 +545,41 @@ func (m Model) renderGameDetailView() string {
 	if len(detail.HomeTeam.Statistics) > 0 || len(detail.AwayTeam.Statistics) > 0 {
 		contentLines = append(contentLines, lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render("📊 Team Statistics"))
 		contentLines = append(contentLines, "")
-		
+
+		// Add team headers
+		awayTeamName := detail.AwayTeam.ShortName
+		homeTeamName := detail.HomeTeam.ShortName
+		if awayTeamName == "" {
+			awayTeamName = detail.AwayTeam.Name
+		}
+		if homeTeamName == "" {
+			homeTeamName = detail.HomeTeam.Name
+		}
+
+		headerLine := fmt.Sprintf("  %-18s %8s    |    %-18s %8s",
+			"Stat", awayTeamName, "Stat", homeTeamName)
+		contentLines = append(contentLines, lipgloss.NewStyle().Bold(true).Foreground(primaryColor).Render(headerLine))
+		contentLines = append(contentLines, statusStyle.Render("  "+strings.Repeat("-", 18)+" "+strings.Repeat("-", 8)+"    |    "+strings.Repeat("-", 18)+" "+strings.Repeat("-", 8)))
+
 		// Create columns for away and home stats
 		maxStats := len(detail.AwayTeam.Statistics)
 		if len(detail.HomeTeam.Statistics) > maxStats {
 			maxStats = len(detail.HomeTeam.Statistics)
 		}
-		
-		for i := 0; i < maxStats && i < 10; i++ { // Limit to 10 stats
+
+		for i := 0; i < maxStats && i < 12; i++ { // Increased to 12 stats
 			var statLine string
 			if i < len(detail.AwayTeam.Statistics) {
 				stat := detail.AwayTeam.Statistics[i]
-				statLine = fmt.Sprintf("  %-20s: %8s", stat.Label, stat.Value)
+				statLine = fmt.Sprintf("  %-18s %8s", stat.Label, stat.Value)
+			} else {
+				statLine = fmt.Sprintf("  %-18s %8s", "", "")
 			}
 			if i < len(detail.HomeTeam.Statistics) {
 				stat := detail.HomeTeam.Statistics[i]
-				statLine += fmt.Sprintf("    |    %-20s: %8s", stat.Label, stat.Value)
+				statLine += fmt.Sprintf("    |    %-18s %8s", stat.Label, stat.Value)
+			} else {
+				statLine += fmt.Sprintf("    |    %-18s %8s", "", "")
 			}
 			contentLines = append(contentLines, statusStyle.Render(statLine))
 		}
@@ -557,33 +590,34 @@ func (m Model) renderGameDetailView() string {
 	if len(detail.Plays) > 0 {
 		contentLines = append(contentLines, lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render("📝 Recent Plays"))
 		contentLines = append(contentLines, "")
-		
+
 		playCount := 0
 		for _, play := range detail.Plays {
-			if playCount >= 15 { // Limit display
+			if playCount >= 20 { // Increased to 20 plays
 				break
 			}
-			
+
 			playPrefix := "  "
 			playTextStyle := statusStyle
 			if play.ScoringPlay {
 				playPrefix = "🎯 "
 				playTextStyle = liveStyle
 			}
-			
+
 			clockInfo := ""
 			if play.Period != "" && play.Clock != "" {
 				clockInfo = fmt.Sprintf("[%s %s] ", play.Period, play.Clock)
 			}
-			
+
 			playText := fmt.Sprintf("%s%s%s", playPrefix, clockInfo, play.Text)
 			contentLines = append(contentLines, playTextStyle.Render(playText))
 			playCount++
 		}
 	}
 
-	// Calculate visible content
-	availableHeight := m.height - 8 // Reserve for title, help, margins
+	// Calculate visible content (account for fixed header)
+	headerHeight := 8                              // Estimated height of fixed header
+	availableHeight := m.height - headerHeight - 4 // Reserve for help and margins
 	startLine := m.detailScrollOffset
 	endLine := startLine + availableHeight
 	if endLine > len(contentLines) {
@@ -593,7 +627,10 @@ func (m Model) renderGameDetailView() string {
 		startLine = 0
 	}
 
-	visibleContent := lipgloss.JoinVertical(lipgloss.Left, contentLines[startLine:endLine]...)
+	visibleContent := ""
+	if len(contentLines) > 0 {
+		visibleContent = lipgloss.JoinVertical(lipgloss.Left, contentLines[startLine:endLine]...)
+	}
 
 	// Scroll indicator
 	scrollInfo := ""
@@ -602,17 +639,63 @@ func (m Model) renderGameDetailView() string {
 			fmt.Sprintf(" (Scroll: %d/%d lines)", startLine+1, len(contentLines)))
 	}
 
-	title := titleStyle.Render("🏆 Game Details")
+	title := titleStyle.Render("🏆 Game Details") + scrollInfo
 	help := helpStyle.Render("↑/k up • ↓/j down • esc back • q quit")
 
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
-		title+scrollInfo,
+		title,
+		"",
+		header,
 		"",
 		visibleContent,
 		"",
 		help,
 	)
+}
+
+func (m Model) renderGameDetailHeader(detail *api.GameDetail) string {
+	// Status with live indicator
+	status := detail.Status
+	if detail.IsLive {
+		status = liveStyle.Render(fmt.Sprintf("🔴 LIVE - %s", detail.Status))
+		if detail.Period != "" && detail.Clock != "" {
+			status += statusStyle.Render(fmt.Sprintf(" • %s %s", detail.Period, detail.Clock))
+		}
+	} else {
+		status = statusStyle.Render(status)
+	}
+
+	// Team records and logos
+	awayRecord := ""
+	homeRecord := ""
+	if detail.AwayTeam.Record != "" {
+		awayRecord = lipgloss.NewStyle().Foreground(dimColor).Render(fmt.Sprintf(" (%s)", detail.AwayTeam.Record))
+	}
+	if detail.HomeTeam.Record != "" {
+		homeRecord = lipgloss.NewStyle().Foreground(dimColor).Render(fmt.Sprintf(" (%s)", detail.HomeTeam.Record))
+	}
+
+	// Get team logos/emojis
+	awayLogo := displayTeamLogo(detail.AwayTeam.Logo, detail.AwayTeam.Name)
+	homeLogo := displayTeamLogo(detail.HomeTeam.Logo, detail.HomeTeam.Name)
+
+	// Create a clean box for the score
+	scoreBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(primaryColor).
+		Padding(1, 2).
+		Width(m.width - 8)
+
+	scoreContent := lipgloss.JoinVertical(
+		lipgloss.Left,
+		status,
+		"",
+		teamStyle.Render(fmt.Sprintf("%s %-32s %5s", awayLogo, detail.AwayTeam.Name+awayRecord, detail.AwayTeam.Score)),
+		teamStyle.Render(fmt.Sprintf("%s %-32s %5s", homeLogo, detail.HomeTeam.Name+homeRecord, detail.HomeTeam.Score)),
+	)
+
+	return scoreBox.Render(scoreContent)
 }
 
 func getSportIcon(sportID string) string {
@@ -690,4 +773,3 @@ var (
 			Foreground(liveColor).
 			Padding(0, 2)
 )
-

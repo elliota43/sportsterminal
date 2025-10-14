@@ -358,7 +358,7 @@ func GetGameDetail(sport string, league string, eventID string) (*GameDetail, er
 		if teams, ok := boxscore["teams"].([]interface{}); ok {
 			for _, t := range teams {
 				team := t.(map[string]interface{})
-				teamID := getString(team, "team", "id")
+				teamName := getString(team, "team", "displayName")
 
 				stats := []Statistic{}
 				if statistics, ok := team["statistics"].([]interface{}); ok {
@@ -371,11 +371,10 @@ func GetGameDetail(sport string, league string, eventID string) (*GameDetail, er
 					}
 				}
 
-				// Match to home/away team
-				if detail.HomeTeam.Name != "" && teamID != "" {
+				// Match to home/away team by comparing team names
+				if teamName == detail.HomeTeam.Name {
 					detail.HomeTeam.Statistics = stats
-				}
-				if detail.AwayTeam.Name != "" && teamID != "" {
+				} else if teamName == detail.AwayTeam.Name {
 					detail.AwayTeam.Statistics = stats
 				}
 			}
@@ -406,16 +405,36 @@ func GetGameDetail(sport string, league string, eventID string) (*GameDetail, er
 
 	// Extract leaders
 	if leaders, ok := result["leaders"].([]interface{}); ok {
-		for _, l := range leaders {
-			leader := l.(map[string]interface{})
-			if leaders, ok := leader["leaders"].([]interface{}); ok && len(leaders) > 0 {
-				topLeader := leaders[0].(map[string]interface{})
-				detail.Leaders = append(detail.Leaders, Leader{
-					Category: getString(leader, "displayName"),
-					Team:     getString(topLeader, "team", "shortDisplayName"),
-					Athlete:  getString(topLeader, "athlete", "displayName"),
-					Value:    getString(topLeader, "displayValue"),
-				})
+		for _, teamLeader := range leaders {
+			teamLeaderMap := teamLeader.(map[string]interface{})
+			teamName := getString(teamLeaderMap, "team", "displayName")
+
+			// Get the leaders array for this team
+			if teamLeaders, ok := teamLeaderMap["leaders"].([]interface{}); ok {
+				for _, categoryLeader := range teamLeaders {
+					categoryLeaderMap := categoryLeader.(map[string]interface{})
+					categoryName := getString(categoryLeaderMap, "displayName")
+
+					// Get the actual leaders for this category
+					if categoryLeaders, ok := categoryLeaderMap["leaders"].([]interface{}); ok && len(categoryLeaders) > 0 {
+						// Take the first (top) leader for this category
+						topLeader := categoryLeaders[0].(map[string]interface{})
+						athleteName := getString(topLeader, "athlete", "displayName")
+						if athleteName == "" {
+							athleteName = getString(topLeader, "athlete", "fullName")
+						}
+						if athleteName == "" {
+							athleteName = getString(topLeader, "athlete", "shortName")
+						}
+
+						detail.Leaders = append(detail.Leaders, Leader{
+							Category: categoryName,
+							Athlete:  athleteName,
+							Team:     teamName,
+							Value:    getString(topLeader, "displayValue"),
+						})
+					}
+				}
 			}
 		}
 	}
